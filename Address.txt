@@ -1,4 +1,4 @@
-<apex:page controller="AddressVerfController" sidebar="false"> 
+<apex:page controller="AddressVerfController" sidebar="false" showHeader="false">    
 
     <apex:includeScript value="{!$Resource.jquery_1_8_1}"/>
     <apex:includeScript value="https://maps.googleapis.com/maps/api/js?key=AIzaSyB4niR1Q3pIMVNGK7dEmfEn1dFYGrP1V4w&sensor=false"/>
