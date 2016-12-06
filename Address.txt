@@ -1,0 +1,435 @@
+<apex:page controller="AddressVerfController" sidebar="false"> 
+
+    <apex:includeScript value="{!$Resource.jquery_1_8_1}"/>
+    <apex:includeScript value="https://maps.googleapis.com/maps/api/js?key=AIzaSyB4niR1Q3pIMVNGK7dEmfEn1dFYGrP1V4w&sensor=false"/>
+    
+    <style type="text/css">
+        .bPageBlock { box-shadow: 3px 3px 5px -3px #999,-3px 3px 5px -3px #999; }
+        .bPageBlock .pbTitle {width:auto;}
+        .highlighted { background-color: #ffff99; }
+        .vfHelpText a            {position:relative;}
+        .vfHelpText a span       {display: none;}
+        .vfHelpText a:hover span {
+            display: block;
+            position:absolute;
+            top:1.25em;
+            left:-15em; width:16em;
+            padding:2px 5px;
+            z-index:100;
+            border:1px solid black;
+            border-radius:4px;
+            background-color:#ffffcc;
+            color:black;
+            box-shadow: 3px 3px 5px -3px #999,-3px 3px 5px -3px #999;
+        }
+        #map_canvas          {width:100%; height:400px; margin-top:5px;}
+        #search-location     {width:auto;}
+        .location-container  {background:#fff; padding:5px; border:1px solid #E8E8E8;}
+        .zip-form            {width:600px; margin:0 auto;}
+        .search-error        {color:#BB0000; font-weight:bold; text-align:center;}
+    </style>
+    
+    <apex:outputPanel title="Verification Results" id="javascript">
+        <script type="text/javascript">
+            function confirmDialog(){
+                var AddressVerified = '{!IF(addr.Service_Address_Verified__c == "Yes", "Yes", "No")}';
+                var AddressType = '{!Address_Type}';
+                var InternationalAddress = '{!IF(acct.International_Service_Address__c, "Yes", "No")}'; //related to 36611
+          
+                if(AddressType == "AccountService" && InternationalAddress == "Yes"){
+                    alert('International Addresses Cannot Be Verified At This Time');
+                    window.location.href = '/{!addr.Id}';
+                }else if (AddressVerified == "No") {
+                    if ((AddressType == "AccountService" || AddressType == "MoveTo") && {!multipleAddresses}) {
+                        alert('Multiple address options found. \nPlease select one to continue.');
+                    } else if({!!hasErrors}){
+                        var dialog = confirm('Address could not be Verified.\nWould you like to find your location on a map?\nClick \'OK\' to display the Map.\nClick \'Cancel\' if you would like to refine the address.');
+                        if(dialog == true){
+                            showConstructionMap();   //Displays the new construction map. (Refer SFDC-210, SFDC-228)
+                        }
+                        
+                        /***
+                        var dialog = confirm('Address could not be verified.\nWould you like to find your location on a map?\nClick \'Ok\' if this is a new construction.\nClick \'Cancel\' if you would like to refine the address.');
+                        if(dialog == true){
+                            window.location.href = '/apex/account_lat_long?scontrolCaching=1&id={!addr.Id}&type='+AddressType;
+                        }
+                        ***/            
+                    }
+                }
+            }
+            function disableBtn(value){
+                var spinner = "<img src='/apexpages/devmode/img/saveStatus.gif'/>";
+                if(value == "Verifying.."){
+                    document.getElementById('spin').innerHTML = spinner;
+                    document.getElementById('verifybtn').value = value;
+                    document.getElementById('verifybtn').className = "btnDisabled";
+                    document.getElementById('verifybtn').disabled = true;
+                }else {
+                    document.getElementById('spin2').innerHTML = spinner;
+                    document.getElementById('saveBtn').value = value;
+                    document.getElementById('saveBtn').className = "btnDisabled";
+                    document.getElementById('saveBtn').disabled = true;
+                }
+            }
+            
+            var marker,
+                map,
+                geocoder,
+                infowindow = new google.maps.InfoWindow();
+                
+            function showMapForReposition(reposition){ 
+                if(reposition.is(':checked'))
+                    showConstructionMap();
+                else
+                    document.getElementById('mapPanel').style.display = "none";
+            }
+                
+            function showConstructionMap(){
+                document.getElementById('mapPanel').style.display = "block";                            
+                
+                var mapOptions = {
+                    center: new google.maps.LatLng(39.356, -97.416),
+                    zoom: 3,
+                    mapTypeId: google.maps.MapTypeId.ROADMAP
+                };
+    
+                map = new google.maps.Map(document.getElementById("map_canvas"),mapOptions);
+    
+                marker = new google.maps.Marker({
+                    map: map,
+                    draggable: true
+                });
+    
+                if($(".Service_Address_Latitude__c,.Service_Address_Longitude__c").filter(function(){return $(this).val() == "";}).size() == 0)
+                    setLocation(new google.maps.LatLng($(".Service_Address_Latitude__c").val(), $(".Service_Address_Longitude__c").val()),13);
+    
+                geocoder = new google.maps.Geocoder();
+                
+                /*** Removed this and added drag functionality (Refer SFDC-210)   
+                google.maps.event.addListener(marker, 'click', function() {
+                    map.setCenter(marker.getPosition());
+                });
+                
+                google.maps.event.addListener(map, 'click', function(e) {
+                    setLocation(e.latLng);
+                    geocodePosition(e.latLng);
+                    //zoomIn(e.latLng);
+                });
+                ***/
+                
+                google.maps.event.addListener(marker, 'dragend', function(e) {
+                    setLocation(e.latLng);
+                    geocodePosition(e.latLng);                
+                });
+                
+                $("form.zip-form").on("submit",function(e){
+                    e.preventDefault();
+                    $("p.search-error").remove();
+                    
+                    var searchLocation = $(this).find("#search-location").val();
+                    
+                    if(searchLocation != null && searchLocation != '')
+                        geocodeLocation(searchLocation);
+                    
+                });
+                $(".Service_Address_Latitude__c,.Service_Address_Longitude__c").attr("readonly","readonly");
+                $('.find-zip-btn').click();
+            }
+        
+            function geocodeLocation(searchAddr){
+                var searchCity='', searchStateZip='', searchState='';
+                
+                if(searchAddr.split(',').length > 2){
+                    searchCity = searchAddr.split(',')[1];
+                    searchStateZip = searchAddr.split(',')[2];
+                    searchState = searchStateZip.trim().split(' ')[0];
+                }
+                
+                geocoder.geocode({
+                    address:searchAddr
+                }, function(result,status){
+                    if(status == "OK") {
+                        if (result[0].geometry.location_type == "ROOFTOP" || result[0].geometry.location_type == "RANGE_INTERPOLATED") { 
+                            var resultAddress = result[0].formatted_address;
+                            var resultCity = resultAddress.split(',')[1];
+                            var resultStateZip = resultAddress.split(',')[2];
+                            var resultState = resultStateZip.trim().split(',')[0];
+                            
+                            if(searchCity != '' && searchCity.trim() == resultCity.trim() && 
+                               searchState != '' && searchState == resultState){
+                                setLocation(result[0].geometry.location,13);
+                                infowindow.setContent(result[0].formatted_address);
+                                infowindow.open(map, marker);
+                            }else{
+                                searchLocation = searchCity+', '+searchStateZip;
+                                geocodeLocation(searchLocation);
+                            }                                   
+                            
+                        } else {                         // location_type = GEOMETRIC_CENTER or APPROXIMATE 
+                            infowindow.close();
+                            zoomIn(result[0].geometry.location,13); 
+                            $("#map_canvas").before($("<p class='search-error'>The address entered needs to be more specific (" + result[0].geometry.location_type + ").</p>"));  
+                        }
+                    } else {
+                        infowindow.close();
+                        $("#map_canvas").before($("<p class='search-error'>Location not found please try again.</p>"));
+                    }
+                });
+            }
+            
+            function geocodePosition(position) {
+                $("p.search-error").remove();
+                geocoder.geocode({
+                    latLng: position
+                }, function(responses,status) {
+                    if(status == google.maps.GeocoderStatus.OK) {
+                        if (responses && responses.length > 0) {
+                            infowindow.setContent(responses[0].formatted_address);
+                            infowindow.open(map, marker);                            
+                        } else {
+                            infowindow.close();
+                            $("#map_canvas").before($("<p class='search-error'>Unable to locate the address at this position.</p>"));
+                        } 
+                    } else {
+                        infowindow.close();
+                        $("#map_canvas").before($("<p class='search-error'>Unable to locate the address, please try again.</p>"));
+                    }
+                });
+            }
+    
+            function zoomIn(position, zoom){ 
+                marker.setPosition(position);
+                map.panTo(position);
+    
+                if(typeof zoom != "undefined")
+                    map.setZoom(zoom);
+                    
+                $(".Service_Address_Latitude__c").val("");
+                $(".Service_Address_Longitude__c").val("");                
+            }        
+    
+            function setLocation(position,zoom){
+                marker.setPosition(position);
+                map.panTo(position);
+    
+                if(typeof zoom != "undefined")
+                    map.setZoom(zoom);
+    
+                $(".Service_Address_Latitude__c").val(position.lat());
+                $(".Service_Address_Longitude__c").val(position.lng());
+            } 
+        </script>
+    </apex:outputPanel>  
+
+    <!-- Persistant Header Information -->
+    <div style="width: 92%; margin-bottom: 2%; display: inline-block; position: relative;">
+      <div id="AddressHeader" style="float: left; margin-right: 10px;">
+          <img src="/s.gif" alt="Address" class="pageTitleIcon" title="{!ObjectType}" />
+          <h1 class="pageType">{!ObjectType}</h1>
+      </div>
+      <div style="float:left; margin-right: 30px;">
+          <h style="font-size: 22px;">{!LEFT(addr.Name, 14)} - {!LEFT(addr.Site, 14)}</h><br />
+          <b>Global Account ID: </b>{!addr.Global_Account_ID__c}<br />
+      </div>
+      <div style="float:left;">
+          <h style="font-size: 22px;">Address Validation</h><br />
+          <apex:outputPanel id="verificationStatus">
+              <b>Status: </b> <span style="color: {!IF(addr.Service_Address_Verified__c == 'Yes', 'Green', 'Red')}">{!IF(addr.Service_Address_Verified__c == 'Yes', 'Verified', 'Not Verified')}</span>
+              <img src="{!IF(addr.Service_Address_Verified__c == 'Yes', '/img/msg_icons/confirm16.png', '/img/msg_icons/warning16.png')}"/>
+          </apex:outputPanel>
+      </div>
+    </div>  
+    
+    <apex:outputPanel id="fullPage">
+        <apex:form id="formId">
+            <apex:actionFunction name="verifyAddress" action="{!saveAddress}" onComplete="AddressVerification()" reRender="formId" />
+            <apex:actionFunction name="AddressVerification" action="{!AddressVerification}" onComplete="confirmDialog();" status="verifystatus"
+                reRender="errors, verificationStatus, javascript, AddressInformation, addressSelect, fullPage, notes, knownBuilding, knownLocation, mapPanel" >
+            </apex:actionFunction>
+            <apex:actionStatus id="verifystatus" onstart="disableBtn('Verifying..');return false;" />
+            
+            <apex:pageMessages />
+            <div style="float:left;width:25%;margin:auto;display:inline;">
+                <apex:pageBlock title="{!PageTitle}" id="AddressInformation">
+                    <apex:pageblocksection columns="1">
+                        <apex:inputField value="{!addr.ShippingStreet}" label="Address" />
+                        <apex:inputfield value="{!addr.Service_Address_Unit_Designator_1__c}" label="Address 2" />
+                        <apex:inputField value="{!addr.ShippingCity}" label="City"/>
+                        <apex:inputField value="{!addr.ShippingState}" label="State/Province"/>
+                        <apex:inputField value="{!addr.ShippingPostalCode}" label="Zip/Postal Code"/>
+                        <apex:inputField value="{!addr.ShippingCountry}" label="Country"/>
+                    </apex:pageblocksection>
+                    <div style="text-align:center;border-top:1px solid #ccc;margin-top:8px;padding:8px;">
+                        <input id="verifybtn" class="btn" type="submit" value="Verify" onClick="disableBtn('Verifying..');verifyAddress();return false;"/>
+                        <span id="spin"></span>
+                        <apex:commandButton value="Done" action="{!goBack}"/>
+                    </div>
+                </apex:pageBlock>   
+             </div>
+             
+             <!--10.21.16: Shows all the buildings resulted from the fuzzy search and allows the user to select. (Refer SFDC-228) -->
+             <div style="float:left;margin-left:2%;width:73%;">
+                <apex:pageBlock title="Buildings" rendered="{!isKnownBuilding}">
+                    <apex:pageBlockTable value="{!buildings}" var="wb">
+                        <apex:column styleClass="{!if(wb.isSelected, 'highlighted', '')}">
+                            <apex:outputPanel rendered="{!wb.isSelected}">
+                                <input type="radio" name="selectBuilding"  checked="true">
+                                    <!--<apex:actionSupport event="onclick" action="{!updateSelectedBuilding}"  reRender="formId" >                                      
+                                        <apex:param name="selBuildingId" value="{!wb.building.id}" />
+                                    </apex:actionSupport>-->
+                                </input>
+                            </apex:outputPanel>
+                            <apex:outputPanel rendered="{!!wb.isSelected}">
+                                <input type="radio" name="selectBuilding" >
+                                    <apex:actionSupport event="onclick" action="{!updateSelectedBuilding}"  reRender="formId" >                                      
+                                        <apex:param name="selBuildingId" value="{!wb.building.id}" />
+                                    </apex:actionSupport>
+                                </input>
+                            </apex:outputPanel>
+                        </apex:column>
+                        <apex:column styleClass="{!if(wb.isSelected, 'highlighted', '')}" headerValue="Name">
+                            <a href="/{!wb.building.Id}" target="_blank">{!wb.building.Name}</a>
+                        </apex:column>
+                        <apex:column value="{!wb.building.Net_Classification__c}" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!wb.building.Status__c}" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!wb.building.CLLI_Code__c}" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!wb.building.Market__c}" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!wb.building.Type__c}" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!wb.fixedWirelessStatus}" headerValue="Fixed Wireless Capability/Status" styleClass="{!if(wb.isSelected, 'highlighted', '')}"/>     
+                        <apex:column styleClass="{!if(wb.isSelected, 'highlighted', '')}">
+                            <span class="vfHelpText">
+                                <a> <img src="/img/func_icons/util/info16.png" />
+                                    <span>
+                                        Min. Req. Revenue Hurdle: ${!wb.building.Minimum_Required_Revenue_Hurdle__c} <br/>
+                                        Total Revenue Commitment: ${!wb.building.Total_Revenue_Commitment__c}
+                                    </span>
+                                </a>
+                            </span>
+                        </apex:column>
+                    </apex:pageBlockTable>
+                    <div style="margin-left:10px;margin-top:4px;">
+                        <apex:commandButton value="Insert" action="{!insertNewBuilding}" rendered="{!IF(matchedBuilding==null,true,false)}" reRender="formId"/>
+                    </div>
+                </apex:pageBlock>
+
+            <!--Commented below block of code as part of SFDC-228
+            <div style="float:left;margin-left:2%;width:73%;">
+                <apex:pageBlock title="Building" rendered="{!isKnownBuilding}" id="knownBuilding">
+                    <!--<apex:pageBlockTable value="{!buildings}" var="b">--7.22.16: Commented and added below line to display this block always even when the new building creates which was not there in previous (Refer SFDC-731)
+                    <apex:pageBlockTable value="{!matchedBuilding}" var="b">
+                        <apex:column value="{!b.Net_Classification__c}"/>
+                        <apex:column value="{!b.Status__c}"/>
+                        <apex:column value="{!b.CLLI_Code__c}" />
+                        <apex:column value="{!b.Market__c}"/>
+                        <apex:column value="{!b.Type__c}"/>
+                        <!--<apex:column value="{!b.Minimum_Required_Revenue_Hurdle__c}" />
+                        <apex:column value="{!b.Total_Revenue_Commitment__c}" />
+                        <!--<apex:column headerValue="Fixed Wireless Capability/Status" value="{!fixedWirelessStatus}"/> <!--7.22.16: Added to display Fixed Wireless Capability/Status of BAA records (Refer SFDC-731)     
+                        <!-- 9.23.2016: Moving below fields to a tool tip which will be shown after hovering on an 'information' icon.(Refer SFDC-824)
+                        <apex:column >
+                            <span class="vfHelpText">
+                                <a> <img src="/img/func_icons/util/info16.png" />
+                                    <span>
+                                        Min. Req. Revenue Hurdle: ${!b.Minimum_Required_Revenue_Hurdle__c} <br/>
+                                        Total Revenue Commitment: ${!b.Total_Revenue_Commitment__c}
+                                    </span>
+                                </a>
+                            </span>
+                        </apex:column>
+                    </apex:pageBlockTable>
+                </apex:pageBlock>
+                -->
+            
+                <apex:pageBlock title="Locations" rendered="{!isKnownLocation}" id="knownLocation">
+                    <apex:pageBlockTable value="{!locations}" var="l" > 
+                        <apex:column styleClass="{!if(l.isSelected, 'highlighted', '')}">
+                            <apex:outputPanel rendered="{!l.isSelected}">
+                                <input type="radio" name="selectLocation"  checked="true">
+                                    <!--<apex:actionSupport event="onclick" action="{!updateSelectedLocation}"  reRender="formId" >                                      
+                                        <apex:param name="locId" value="{!l.loc.id}" />
+                                    </apex:actionSupport>-->
+                                </input>
+                            </apex:outputPanel>
+                            <apex:outputPanel rendered="{!!l.isSelected}">
+                                <input type="radio" name="selectLocation" >
+                                    <apex:actionSupport event="onclick" action="{!updateSelectedLocation}"  reRender="formId" >                                      
+                                        <apex:param name="locId" value="{!l.loc.id}" />
+                                    </apex:actionSupport>
+                                </input>
+                            </apex:outputPanel>
+                        </apex:column>
+                        <apex:column value="{!l.loc.Name}" styleClass="{!if(l.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!l.loc.Building__c}" styleClass="{!if(l.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!l.loc.Rm_Ste__c}" styleClass="{!if(l.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!l.loc.Status__c}" styleClass="{!if(l.isSelected, 'highlighted', '')}"/>
+                        <apex:column value="{!l.loc.Windstream_POP__c}" styleClass="{!if(l.isSelected, 'highlighted', '')}"/>
+                    </apex:pageBlockTable>
+                </apex:pageBlock>
+                <apex:outputPanel rendered="{!showRepositionCheckbox}">
+                    <input type="checkbox" onchange="showMapForReposition($(this));return false;"/>
+                    <b><i>Reposition Service Location</i></b>
+                </apex:outputPanel>
+            </div>
+                
+            <div style="float:left;margin-left:2%;width:72%;">
+                <apex:outputPanel id="notes" title="Address Verification Notes" rendered="{!multipleAddresses}">
+                    <apex:pageBlock title="Address Verification Notes">
+                        <apex:pageBlockSection >
+                            <apex:outputText style="color:red;" value="{!selectedValidationNote}" /> <br /><br />
+                            <apex:outputText style="color:red;" value="Please double check the address entered and re-verify the address." />
+                        </apex:pageBlockSection>
+                    </apex:pageBlock>
+                </apex:outputPanel>
+    
+                <apex:outputPanel id="addressSelect" rendered="{!multipleAddresses}">
+                    <apex:pageBlock title="Multiple Address Matches">
+                        The address has produced multiple possible matches.  Please select one of the matches for the validated address.
+                        <apex:pageBlockSection >
+                            <apex:selectList value="{!selectedAddress}" multiselect="false" size="4" style="width: 550px;"  >
+                                <apex:selectOptions value="{!addressList}"/>
+                                <apex:actionSupport event="onchange" reRender="notes" action="{!showValidationNote}"/>
+                            </apex:selectList>
+                            <!--<apex:outputText value="{!multipleAddresses}" />-->
+                            <!--<apex:outputText value="{!ShowAddressList}" /> -->
+                        </apex:pageBlockSection>
+                        <apex:pageBlockButtons location="bottom">
+                            <apex:commandButton value="Select" action="{!selectAddress}" />
+                        </apex:pageBlockButtons>
+                    </apex:pageBlock>
+                </apex:outputPanel>   
+            </div>            
+        </apex:form>
+        
+        <!-- 9.02.2016: To show the new construction map when address is not verified.(Refer SFDC-210)
+             10.21.2016: Moved this part of the code here from Account_Lat_Long page. (Refer SFDC-228) -->
+        <div id="mapPanel" style="display:none;float:left;margin-left:2%;width:72%;">  
+            <apex:pageBlock >
+                <div class="location-container">
+                    <form class="zip-form">
+                        <label for="search-location">Search for your location or locate it on the Map below: </label>
+                        <input type="text" id="search-location" value="{!searchAddress}" />
+                        <button type="submit" class="find-zip-btn" style="padding:4px;3px;">Search</button>
+                        <br/>
+                        <label style="font-style:italic;">Note: Address entered in search field will not copy back to the Account record.</label>
+                    </form>
+                    <br/>
+                    <apex:form id="save_form">
+                        <apex:pageBlockSection collapsible="false" showHeader="false">
+                            <apex:inputField required="true" styleClass="Service_Address_Latitude__c" value="{!addr.Service_Address_Latitude__c}" />
+                            <apex:inputField required="true" styleClass="Service_Address_Longitude__c" value="{!addr.Service_Address_Longitude__c}" />
+                        </apex:pageBlockSection>
+                        <div style="text-align:center;">
+                            <input id="saveBtn" class="btn" type="submit" value="Save" onClick="disableBtn('Saving..');save();return false;"/>
+                            <span id="spin2"></span>
+                            <apex:actionFunction name="save" action="{!newConstructionSave}" oncomplete="callParsingService();" status="savestatus"/>
+                            <apex:actionFunction name="callParsingService" action="{!callParsingService}" oncomplete="document.getElementById('mapPanel').style.display = 'none';" reRender="fullPage,verificationStatus"/>
+                            <apex:actionStatus id="savestatus" onstart="disableBtn('Saving..');return false;" />
+                        </div>
+                    </apex:form>
+                    <div id="map_canvas"></div>
+                </div>
+            </apex:pageBlock>
+        </div>
+    </apex:outputPanel>    
+    
+</apex:page>
